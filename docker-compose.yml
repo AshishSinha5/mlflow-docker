@@ -1,0 +1,79 @@
+version: '3.7'
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:latest
+    networks:
+      - backend
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - ${POSTGRES_PORT}:${POSTGRES_PORT}
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+
+  # MinIO server
+  storage:
+    image: minio/minio
+    expose:
+      - ${MINIO_PORT}
+    ports:
+      - ${MINIO_PORT}:${MINIO_PORT}
+      - ${MINIO_CONSOLE_PORT}:${MINIO_CONSOLE_PORT}
+    volumes:
+      - ./storage/:/storage
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":${MINIO_CONSOLE_PORT}"
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      - storage
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc config host add myminio http://storage:${MINIO_PORT} ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY}) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb myminio/${MINIO_BUCKET_NAME};
+      /usr/bin/mc policy set download myminio/${MINIO_BUCKET_NAME};
+      exit 0;
+      "
+
+  tracking_server:
+    restart: unless-stopped
+    build:
+      context: ./mlflow
+    image: ghcr.io/mlflow/mlflow:v2.0.1
+    container_name: mlflow_server
+    depends_on:
+      - postgres
+      - storage
+    ports:
+      - ${MLFLOW_PORT}:${MLFLOW_PORT}
+    networks:
+      - frontend
+      - backend
+    environment:
+      - "BACKEND_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}"
+      - "MLFLOW_S3_ENDPOINT_URL=http://storage:${MINIO_PORT}"
+      - "ARTIFACT_ROOT=minio://${MINIO_BUCKET_NAME}/"
+      - "AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}"
+      - "AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}"
+    command: >
+      mlflow server 
+      --backend-store-uri ${BACKEND_URI} 
+      --default-artifact-root ${ARTIFACT_ROOT} 
+      --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${MLFLOW_PORT}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
